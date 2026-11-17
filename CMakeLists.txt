@@ -224,7 +224,7 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/extern/sdl3/CMakeLists.txt)
     add_library(gpurender STATIC src/app/gpu/gpu_renderer.cpp)
     target_include_directories(gpurender PUBLIC src)
     target_link_libraries(gpurender PUBLIC runtime ${M2_SDL_TARGET})
-    add_library(daytona_app OBJECT src/app/main.cpp src/app/launcher.cpp src/app/config.cpp src/app/controls.cpp src/app/ffb.cpp src/app/link_socket.cpp src/app/pacing.cpp)
+    add_library(daytona_app OBJECT src/app/main.cpp src/app/launcher.cpp src/app/config.cpp src/app/controls.cpp src/app/ffb.cpp src/app/link_socket.cpp src/app/pacing.cpp src/app/telemetry.cpp)
     target_link_libraries(daytona_app PRIVATE runtime imgui gpurender ${M2_SDL_TARGET})
     if(WIN32)
         target_link_libraries(daytona_app PUBLIC ws2_32) # link play's sockets
@@ -410,6 +410,12 @@ add_test(NAME multipcm_volumes COMMAND test_multipcm_volumes)
 add_executable(test_app_pacing tests/test_app_pacing.cpp src/app/pacing.cpp)
 target_include_directories(test_app_pacing PRIVATE src)
 add_test(NAME app_pacing COMMAND test_app_pacing)
+
+# Telemetry packet builders and the DAYTONA_TELEMETRY spec (no sockets opened).
+add_executable(test_app_telemetry tests/test_app_telemetry.cpp src/app/telemetry.cpp)
+target_include_directories(test_app_telemetry PRIVATE src)
+target_link_libraries(test_app_telemetry PRIVATE runtime)
+add_test(NAME app_telemetry COMMAND test_app_telemetry)
 
 add_executable(test_test_hold tests/test_test_hold.cpp)
 target_include_directories(test_test_hold PRIVATE src)

@@ -7,6 +7,7 @@
 //         [--dump-from FRAME] [--native-audio-check] [--nvram DIR] [--save-nvram DIR]
 //         [--link-listen PORT --link-next HOST:PORT [--link-sync]]
 //         [--draw-budget N] [--draw-order-only] [--original-selection] [--scenery-log FILE]
+//         [--ram-probe FILE [--ram-probe-range FIRST:SIZE] [--probe-every N]]
 //
 // --draw-budget is an override independent of --draw-distance:
 // 0 uses Automatic; e.g. --draw-distance 1 --draw-budget 5000 widens
@@ -29,6 +30,16 @@
 // are then wider than 496 (the width is printed).
 // --wav writes the sound board's output (YM3438 + both MultiPCMs, mixed at
 // 48 kHz, 16-bit stereo).
+// --ram-probe dumps a window of the game's RAM every probe-every frames to
+// FILE (a text header "M2RAM FIRST SIZE", then u64 frame + SIZE bytes per
+// record) for offline analysis of the game's own data structures. FIRST:SIZE
+// is hexadecimal, default 500000:6000. Reads go through the bus, RAM pages
+// only: a window over a device range would touch the hardware.
+// --dl-dump walks the geometrizer's display list in buffer RAM every frame
+// (the same walk Geo::parse does) and records every matrix write (0x0b, 12
+// floats), translation write (0x0c, 3 floats) and object command (0x01, the
+// block address and count) to FILE: "M2DL v1", then u64 frame, u32 entries,
+// and per entry u32 tag, u32 word index, u32 n floats, the floats.
 //
 // Frame pacing is the game's own: vblank starts when the game has finished
 // its frame and waits in its idle loop (or after a cap, for frames that never
@@ -86,12 +97,131 @@ void write_wav(const std::string &path, const std::vector<float> &mix, uint32_t 
     for (float v : mix) u16(uint16_t(int16_t(std::lround(std::clamp(v, -1.0f, 1.0f) * 32767.0f))));
 }
 
+// The display-list walk of Geo::parse, minus the rasterizer: the word count
+// of every command so the matrix/translate/object writes can be found.
+// buffer: buffer RAM (0x8000 words); start: the geometrizer's read start.
+struct DlEntry {
+    uint32_t tag, index; // 0x0b matrix, 0x0c translate, 0x01 object
+    std::vector<float> values;
+};
+
+std::vector<DlEntry> walk_display_list(const uint32_t *buffer, uint32_t start) {
+    std::vector<DlEntry> out;
+    auto word = [&](uint32_t &i) -> uint32_t {
+        if (i >= 0x8000) return 0; // ran off the list: the loop's bound check stops it
+        return buffer[i++];
+    };
+    auto f32 = [&](uint32_t v) {
+        float f;
+        std::memcpy(&f, &v, 4);
+        return f;
+    };
+    uint32_t i = (start & 0x1ffff) / 4;
+    for (int ops = 0; ops < 0x8000; ops++) {
+        if (i >= 0x8000) break;
+        const uint32_t opcode = word(i);
+        if (opcode & 0x80000000) { // a jump: follow it
+            i = (opcode & 0x1ffff) / 4;
+            continue;
+        }
+        switch ((opcode >> 23) & 0x1f) {
+        case 0x00: break; // nop
+        case 0x01: case 0x11: { // object data: tpa, tha, block address, count
+            const uint32_t at = i;
+            const uint32_t tpa = word(i), tha = word(i), oba = word(i), obc = word(i);
+            (void)tpa, (void)tha;
+            out.push_back({0x01, at, {f32(oba), f32(obc)}});
+            break;
+        }
+        case 0x02: case 0x12: { // direct data: tpa, tha, two points, then
+            // triangles/quads until an attr word with the low bits clear
+            word(i), word(i), word(i), word(i), word(i), word(i), word(i), word(i);
+            for (;;) {
+                if (i >= 0x8000) break;
+                const uint32_t attr = word(i);
+                word(i), word(i), word(i), word(i), word(i); // luma, distance, x, y, z
+                if (attr & 1) word(i), word(i), word(i);     // a quad's fourth point
+                if ((attr & 3) == 0) break;
+            }
+            break;
+        }
+        case 0x03: case 0x13: word(i), word(i), word(i), word(i), word(i), word(i); break; // window
+        case 0x04: case 0x14: { // texture / log data: first word, count, count words
+            word(i);
+            if (i >= 0x8000) break;
+            const uint32_t count = word(i);
+            for (uint32_t k = 0; k < count && i < 0x8000; k++) word(i);
+            break;
+        }
+        case 0x05: case 0x15: { // polygon data: address, count, count words
+            word(i);
+            if (i >= 0x8000) break;
+            const uint32_t count = word(i);
+            for (uint32_t k = 0; k < count && i < 0x8000; k++) word(i);
+            break;
+        }
+        case 0x06: { // texture parameters: index, count, then 2 words each
+            word(i);
+            if (i >= 0x8000) break;
+            const uint32_t count = word(i);
+            for (uint32_t k = 0; k < 2 * count && i < 0x8000; k++) word(i);
+            break;
+        }
+        case 0x07: case 0x17: word(i); break; // mode
+        case 0x08: case 0x18: word(i); break; // zsort mode
+        case 0x09: case 0x19: word(i), word(i), word(i); break; // focal distance
+        case 0x0a: case 0x1a: word(i), word(i), word(i); break; // light source
+        case 0x0b: case 0x1b: { // matrix write: 12 floats
+            const uint32_t at = i;
+            DlEntry e{0x0b, at, {}};
+            for (int k = 0; k < 12; k++) e.values.push_back(f32(word(i)));
+            out.push_back(std::move(e));
+            break;
+        }
+        case 0x0c: case 0x1c: { // translation write: 3 floats
+            const uint32_t at = i;
+            DlEntry e{0x0c, at, {}};
+            for (int k = 0; k < 3; k++) e.values.push_back(f32(word(i)));
+            out.push_back(std::move(e));
+            break;
+        }
+        case 0x0d: { // geo data memory push: address, count, count words
+            word(i);
+            if (i >= 0x8000) break;
+            const uint32_t count = word(i);
+            for (uint32_t k = 0; k < count && i < 0x8000; k++) word(i);
+            break;
+        }
+        case 0x0e: { // test: 32 fifo words, block count, 3 words a block
+            for (int k = 0; k < 32 && i < 0x8000; k++) word(i);
+            if (i >= 0x8000) break;
+            const uint32_t blocks = word(i);
+            for (uint32_t k = 0; k < 3 * blocks && i < 0x8000; k++) word(i);
+            break;
+        }
+        case 0x0f: case 0x1f: return out; // end
+        case 0x10: word(i); break; // dummy
+        case 0x16: word(i); break; // lod
+        case 0x1d: { // code upload: flags, count, count words
+            word(i);
+            if (i >= 0x8000) break;
+            const uint32_t count = word(i);
+            for (uint32_t k = 0; k < count && i < 0x8000; k++) word(i);
+            break;
+        }
+        case 0x1e: word(i); break; // code jump
+        default: return out;       // an unknown command: the walk is lost, stop here
+        }
+    }
+    return out;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
     if (argc < 3) {
         std::fprintf(stderr, "usage: m2run IMAGES_DIR FRAMES [--inputs FILE] [--dump DIR --every N] [--wav FILE] "
-                             "[--aspect W:H]\n");
+                             "[--aspect W:H] [--ram-probe FILE]\n");
         return 2;
     }
     const std::string dir = argv[1];
@@ -104,6 +234,9 @@ int main(int argc, char **argv) {
     int frame_skip = 0;
     bool hud_edges = false, stretch_backdrop = false, original_selection = false;
     uint32_t draw_budget = 0;
+    std::string probe_path;
+    uint32_t probe_first = 0x500000, probe_size = 0x6000, probe_every = 1;
+    std::string dl_path;
     for (int i = 3; i < argc; i++) {
         if (!std::strcmp(argv[i], "--draw-budget") && i + 1 == argc) {
             std::fprintf(stderr, "m2run: --draw-budget needs a value\n");
@@ -137,6 +270,17 @@ int main(int argc, char **argv) {
             }
         }
         else if (!std::strcmp(argv[i], "--scenery-log")) scenery_log_path = argv[i + 1];
+        else if (!std::strcmp(argv[i], "--ram-probe")) probe_path = argv[i + 1];
+        else if (!std::strcmp(argv[i], "--ram-probe-range")) {
+            unsigned a = 0, b = 0;
+            if (std::sscanf(argv[i + 1], "%x:%x", &a, &b) != 2 || !b) {
+                std::fprintf(stderr, "m2run: --ram-probe-range needs FIRST:SIZE in hex\n");
+                return 2;
+            }
+            probe_first = a, probe_size = b;
+        }
+        else if (!std::strcmp(argv[i], "--probe-every")) probe_every = std::strtoul(argv[i + 1], nullptr, 10);
+        else if (!std::strcmp(argv[i], "--dl-dump")) dl_path = argv[i + 1];
         else if (!std::strcmp(argv[i], "--frame-skip")) frame_skip = std::atoi(argv[i + 1]);
         else if (!std::strcmp(argv[i], "--aspect")) {
             double w = 0, h = 0;
@@ -178,11 +322,46 @@ int main(int argc, char **argv) {
         }
         tools::Script script;
         if (!inputs_path.empty()) script.load(inputs_path);
+        FILE *probe = nullptr;
+        if (!probe_path.empty()) {
+            probe = std::fopen(probe_path.c_str(), "wb");
+            if (!probe) throw std::runtime_error("m2run: cannot write " + probe_path);
+            std::fprintf(probe, "M2RAM %x %x\n", probe_first, probe_size);
+        }
+        std::vector<uint8_t> probe_window;
+        if (probe) probe_window.resize(probe_size);
+        FILE *dl = nullptr;
+        if (!dl_path.empty()) {
+            dl = std::fopen(dl_path.c_str(), "wb");
+            if (!dl) throw std::runtime_error("m2run: cannot write " + dl_path);
+            std::fprintf(dl, "M2DL v1\n");
+        }
         const auto t0 = std::chrono::steady_clock::now();
         std::vector<float> fm, pcm;
         uint64_t drive_commands = 0, drive_kinds[16] = {}; // the force feedback drive board's commands, by type
         for (uint64_t f = 0; f < frames; f++) {
             game.run_frame(script.at(game.board().frame()));
+            if (probe && probe_every && game.board().frame() % probe_every == 0) {
+                const uint64_t fr = game.board().frame();
+                std::fwrite(&fr, 8, 1, probe);
+                for (uint32_t a = 0; a < probe_size; a += 4)
+                    *reinterpret_cast<uint32_t *>(&probe_window[a]) = game.board().read_dword(probe_first + a);
+                std::fwrite(probe_window.data(), 1, probe_window.size(), probe);
+            }
+            if (dl) {
+                const auto entries = walk_display_list(game.board().tgp().buffer(), game.board().tgp().geo_read_start());
+                const uint64_t fr = game.board().frame();
+                std::fwrite(&fr, 8, 1, dl);
+                const uint32_t n = uint32_t(entries.size());
+                std::fwrite(&n, 4, 1, dl);
+                for (const auto &e : entries) {
+                    const uint32_t nf = uint32_t(e.values.size());
+                    std::fwrite(&e.tag, 4, 1, dl);
+                    std::fwrite(&e.index, 4, 1, dl);
+                    std::fwrite(&nf, 4, 1, dl);
+                    std::fwrite(e.values.data(), 4, e.values.size(), dl);
+                }
+            }
             for (uint8_t c : std::exchange(game.board().io().drive_commands, {})) ++drive_commands, ++drive_kinds[c >> 4];
             if (native) { // the app's native audio path, frame by frame
                 const auto bytes = game.board().take_sound_bytes();
@@ -223,6 +402,8 @@ int main(int argc, char **argv) {
             }
         }
         if (!save_nvram_dir.empty()) tools::save_nvram(game, save_nvram_dir);
+        if (probe) std::fclose(probe);
+        if (dl) std::fclose(dl);
         const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         std::printf("m2run: %" PRIu64 " frames, %" PRIu64 " i960 instructions (all native), %" PRIu64
                     " TGP instructions, %d interrupts, %" PRIu64 " bytes to the sound board; %.2f s (%.0f frames/s)\n",

@@ -1,5 +1,47 @@
 # Handoff
 
+## Motion-simulator telemetry and the car-state probe (2026-11-18)
+
+The app now has an optional UDP telemetry emitter (`src/app/telemetry.cpp`,
+`DAYTONA_TELEMETRY=host:port[@json|@forza|@both]`, off by default): one JSON
+line and/or one 324-byte Forza Horizon data-out packet per frame, for motion
+platforms (SimHub reads the Forza size) and dashboards. The acceleration
+channels carry the dashboard reader's convention, m/s^2 (X lateral + right,
+Y vertical with gravity removed, Z longitudinal), velocity Z is the forward
+speed, yaw rate sits on angular Y, and the packets keep flowing in menus with
+is_race_on 0 — silence only when the game pauses or quits. Unit-tested wire
+bytes in `test_app_telemetry`; docs/telemetry.md is the full table.
+
+The car data is read straight from work RAM; nothing is hooked, nothing
+written. Found by scripted headless races (`scripts/inputs` +
+`telemetry_probe`-style phase scripts) and a new `tools/m2run --ram-probe
+FILE [--ram-probe-range FIRST:SIZE] [--probe-every N]` that dumps a work-RAM
+window per frame, then numpy scans against the known speed anchor 0x505198.
+Revision A findings: world position as three floats at 0x50519c/a0/a4
+(metres; the XZ path draws the beginner oval and infield loop exactly;
+displacement tracks the speedometer at 0.90–1.0), gear 0–4 at 0x5052cc,
+a race-scene flag (1.0 float) at 0x505300, distance driven (16.16 m) at
+0x5078b4, a 0x300-stride 20-car record array from 0x505300 with per-car
+flags and float triples. The speed cell is shared with the attract demo car.
+
+Wrong turns worth not repeating: the display list's matrix (0x0b) and
+translation (0x0c) writes are all view-relative — no world matrices in buffer
+RAM; a 9-float orthonormal-block scan over work/main/buffer RAM found nothing
+because the game stores no such block; no winding binary angle turns with the
+laps anywhere probed, so pitch/roll/heading are reported as 0 and yaw rate is
+derived from the position deltas (+ right, validated against scripted steer
+phases). Position-differentiation needs jump rejection: respawns and the
+attract loop move the car tens of metres in one frame. The `--dl-dump` m2run
+option (a display-list walk recording matrix/translate/object writes) is what
+proved the view-relative point; it stays in the tree for the next person.
+`daytona93`'s physics block is unprobed: on that set the emitter sends only
+inputs, drive board and speed until the same probe runs against its ROM.
+
+Setup on this machine: MSVC path (`setup.ps1 --msvc`, VS 2022 Build Tools
+14.44, no Clang component installed). All 22 tests pass, including
+app_telemetry. End-to-end: the game with the variable set streams exactly one
+JSON + one 324-byte datagram per frame, at rest outside races.
+
 ## Widescreen opponent visibility (2026-10-14)
 
 Both ROM revisions use enhancement hooks before the opponent car-cell bit test

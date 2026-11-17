@@ -19,6 +19,7 @@
 #include "app/startup_error.h"
 #include "app/ffb.h"
 #include "app/pacing.h"
+#include "app/telemetry.h"
 #include "runtime/test_hold.h"
 #include "app/link_socket.h"
 #include "app/gpu/gpu_renderer.h"
@@ -541,7 +542,12 @@ int main(int argc, char **argv) {
                 rt::Inputs inputs = cfg.controls.sample(SDL_GetKeyboardState(nullptr), devices);
                 if (cfg.hold_test != test_hold.armed()) cfg.hold_test ? test_hold.arm() : test_hold.cancel();
                 if (test_hold.apply(game->frames(), inputs.in0)) cfg.hold_test = false; // held: the box clears
+                const size_t drive_before = game->board().io().drive_commands.size();
                 game->run_frame(inputs);
+                // Motion-sim telemetry, off unless DAYTONA_TELEMETRY is set: the
+                // frame's own drive-board bytes, before the app drains them all.
+                app::telemetry_frame(game->board(), inputs, game->board().io().drive_commands.data() + drive_before,
+                                     game->board().io().drive_commands.size() - drive_before, game->frames());
 #ifdef M2_MOBILE
                 touch.consumed();
                 cfg.controls.touch = touch.values;

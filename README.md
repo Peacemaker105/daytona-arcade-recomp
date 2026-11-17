@@ -175,6 +175,18 @@ i960 code and runs on the native board with the YM3438 (ymfm) and both
 MultiPCMs; output goes through SDL audio. Volume, mute, and separate music
 and effects volumes are on the launcher's Audio tab.
 
+## Motion-simulator telemetry
+
+The app can send the car's state over UDP while you race, one datagram per
+frame, for a motion platform or a dashboard. Off by default; set
+`DAYTONA_TELEMETRY` to `host:port[@json|@forza|@both]` and start the game.
+`forza` is the 324-byte Forza Horizon data-out packet SimHub reads natively;
+`json` is one line per frame with every field named. The car's world position
+is the game's own physics, and yaw rate and the g forces are derived from it;
+nothing is hooked and nothing is written to the game's memory. See
+[docs/telemetry.md](docs/telemetry.md), and `scripts/telemetry_listen.py` to
+watch the stream.
+
 ## Licence
 
 This project's own code is under the [BSD-3-Clause licence](LICENSE): use,
