@@ -1,5 +1,41 @@
 # Handoff
 
+## Pitch, roll and the suspension pair; the tach cell correction (2026-11-18, later)
+
+The "no pitch or roll in RAM" conclusion from earlier today was wrong, and
+the method note that fixed it is worth keeping: don't hunt matrices, hunt the
+struct. The player's car is the first of a twenty-car record array at
+0x505300 (stride 0x300), and at record +0x3c0/+0x3c4 sits a front suspension
+pair: 0 at rest, both cells sinking together under braking (−0.065 each at
+−2.5 g — the same magnitude Sega Rally 2 measured), splitting under steering
+(left extends when turning left), and a rear pair at +0x3c8/+0x3cc that the
+game never moves — it models no squat, which is why every acceleration-phase
+scan found nothing. Pitch = −(L+R)/2 (nose-down positive), roll = (R−L)/2
+(lean-left positive), both radians by scale, clamped ±0.2; under sustained
+load they keep creeping (resting nose-in against a wall settles at about
+twice the braking dive) — the game's own slow spring, reported as read. They
+feed Forza offsets 60/64 and the JSON (pitch/roll/susp_l/susp_r); the Forza
+suspension block now carries the real front pair scaled around 0.5 with the
+rear at rest.
+
+Two corrections to yesterday's map, both found by driving into them:
+0x505198 is the tachometer percentage, not a speed — at a rolling start it
+sits pinned near 300 while the true speed is low; the HUD km/h formula fits
+only under load. The emitter therefore reports the position-derived speed
+whenever the position flows and falls back to the tach cell otherwise. And
+the race is a rolling start behind a pacer (ROLLING START banner) whose
+start time drifts between runs: script inputs to events visible in the data,
+never to absolute frames. Also mapped while re-testing: the signed 16-bit
+value at 0x5052a8 mirrors steering exactly (±1344 for ±0.19 of lock) but has
+not been separated from a road-relative heading — still unreported.
+
+Experiments that produced this: mirror runs (identical scripts, steer
+0x62/0x9e — full lock at 300 km/h just spins the car), a straight-line brake
+to a full stop with --probe-every 1, and the failed-launch control that
+proved the squat absence. The clean stop also re-confirmed the position
+stream's quality frame by frame. All 22 tests pass; wire bytes for the new
+fields are in test_app_telemetry.
+
 ## Motion-simulator telemetry and the car-state probe (2026-11-18)
 
 The app now has an optional UDP telemetry emitter (`src/app/telemetry.cpp`,

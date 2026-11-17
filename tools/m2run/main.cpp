@@ -236,6 +236,7 @@ int main(int argc, char **argv) {
     uint32_t draw_budget = 0;
     std::string probe_path;
     uint32_t probe_first = 0x500000, probe_size = 0x6000, probe_every = 1;
+    uint64_t probe_from = 0;
     std::string dl_path;
     for (int i = 3; i < argc; i++) {
         if (!std::strcmp(argv[i], "--draw-budget") && i + 1 == argc) {
@@ -280,6 +281,7 @@ int main(int argc, char **argv) {
             probe_first = a, probe_size = b;
         }
         else if (!std::strcmp(argv[i], "--probe-every")) probe_every = std::strtoul(argv[i + 1], nullptr, 10);
+        else if (!std::strcmp(argv[i], "--probe-from")) probe_from = std::strtoull(argv[i + 1], nullptr, 10);
         else if (!std::strcmp(argv[i], "--dl-dump")) dl_path = argv[i + 1];
         else if (!std::strcmp(argv[i], "--frame-skip")) frame_skip = std::atoi(argv[i + 1]);
         else if (!std::strcmp(argv[i], "--aspect")) {
@@ -341,7 +343,7 @@ int main(int argc, char **argv) {
         uint64_t drive_commands = 0, drive_kinds[16] = {}; // the force feedback drive board's commands, by type
         for (uint64_t f = 0; f < frames; f++) {
             game.run_frame(script.at(game.board().frame()));
-            if (probe && probe_every && game.board().frame() % probe_every == 0) {
+            if (probe && probe_every && game.board().frame() >= probe_from && game.board().frame() % probe_every == 0) {
                 const uint64_t fr = game.board().frame();
                 std::fwrite(&fr, 8, 1, probe);
                 for (uint32_t a = 0; a < probe_size; a += 4)

@@ -37,8 +37,8 @@ packet ever changes:
 | 32/36 | VelocityX/Y | 0 |
 | 40 | VelocityZ | forward speed, m/s |
 | 44/48/52 | AngularVelocity | pitch rate 0, yaw rate on Y (+ turning right, rad/s), roll rate 0 |
-| 56/60/64 | yaw/pitch/roll | 0: the game maps no orientation angles (see below) |
-| 68–84 | suspension ×4 | FL FR RL RR, 0..1, dressed from the g forces (0.5 at rest) |
+| 56/60/64 | yaw/pitch/roll | heading 0 (the game stores none); pitch and roll the game's own, radians, nose-down / lean-left positive |
+| 68–84 | suspension ×4 | FL FR from the game's front pair (0.5 at rest, −0.5 + travel × 3), RL RR 0.5: the game moves no rear suspension |
 | 84–99 | tyre slip ×4 | estimated from throttle/brake and speed at the rear |
 | 100–115 | wheel RPM ×4 | speed ÷ wheel circumference |
 | 116–131 | wheels on ground (i32) | 1 |
@@ -60,7 +60,8 @@ script or anything custom:
     {"frame":1234,"on":1,"speed":58.4,"speed_kmh":210.2,"rpm":5200,"gear":3,
      "steer":-0.333,"gas":1.000,"brake":0.000,"ffb_force":-0.220,"shake":0.000,
      "ffb_effect":3,"long_g":0.412,"lat_g":-1.050,"vert_g":1.000,"yaw_rate":0.487,
-     "pos_x":101.02,"pos_y":2.91,"pos_z":-188.49,"distance":4031.7}
+     "pos_x":101.02,"pos_y":2.91,"pos_z":-188.49,"distance":4031.7,
+     "pitch":0.0650,"roll":-0.0157,"susp_l":-0.0651,"susp_r":-0.0632}
 
 ## Behaviour the reader can rely on
 
@@ -84,30 +85,42 @@ All of it is read from the game's work RAM each frame; these are Revision A
 
 | Address | Meaning |
 |---|---|
-| 0x505198 | speed, raw integer; the HUD km/h is about 1.055 × x − 14.5 (already known: the live meters read it) |
+| 0x505198 | the tachometer percentage, not a speed: ~300 at full load, pinned there at a rolling start while the true speed is lower. The HUD km/h fits about 1.055 × x − 14.5 only under load (the app's live meters read it) |
 | 0x50519c/a0/a4 | the car's world position, X/Y/Z, metres: X and Z on the ground plane, Y up (0 on the road, hills to about 10) |
 | 0x5052cc | gear, 0 reverse/neutral then 1–4 |
-| 0x505300 | 1.0 float while a race scene is loaded, 0 outside it |
+| 0x505300 | 1.0 float while a race scene is loaded, 0 outside it; the player's car is the first of a twenty-car record array at 0x505300, stride 0x300 |
+| 0x5056c0/0x5056c4 | the player's front suspension pair (record +0x3c0/+0x3c4): 0 at rest, negative compressed — both sink together under braking (dive), split under steering (lean); −0.065 both at −2.5 g of braking. A rear pair at +0x3c8/+0x3cc exists and the game never moves it |
 | 0x5078b4 | metres driven this race, 16.16 fixed point |
 
-The position is the strongest check in the chain and the source of everything
-derived: plotted over a race it draws the beginner oval and its infield loop
-exactly, and its displacement per frame tracks the speedometer (0.90–1.0 ×
-speed × frame time — the residual is the HUD formula's own approximation).
-Yaw rate is the travel heading's rate of change (+ right, checked against the
-scripted steering phases), and the accelerations come from differentiating the
-velocity in the car's frame: longitudinal along it, lateral across it. A
-respawn or the attract loop's reset jumps the position tens of metres in one
-frame; moves past what the speedometer allows are dropped rather than
-differentiated, so a crash never kicks the platform.
+The position is the strongest check in the chain and the source of most of
+what is derived: plotted over a race it draws the beginner oval and its
+infield loop exactly, and its displacement per frame gives the true speed
+(the tach cell tracks it only under load — at a rolling start it sits pinned
+at 300 while the car is slow). Yaw rate is the travel heading's rate of
+change (+ right, checked against scripted steering phases), and the
+accelerations come from differentiating the velocity in the car's frame:
+longitudinal along it, lateral across it. A respawn or the attract loop's
+reset jumps the position tens of metres in one frame; moves past what a
+plausible speed allows are dropped rather than differentiated, so a crash
+never kicks the platform.
 
-The matrices that would carry pitch, roll and a true heading are built for
-the camera: the display list's own matrix and translation writes are all
-view-relative, and no winding angle turns with the laps anywhere in the
-probed RAM (work RAM 0x500000–0x600000, main RAM 0x200000–0x21ffff and buffer
-RAM 0x900000–0x91ffff were each dumped every few frames over a full scripted
-race). Pitch and roll therefore stay 0, and yaw rate is reported directly
-rather than a heading.
+Pitch and roll are the game's own, from the front suspension pair in the
+player's record (found by the mirror trick: two runs identical except
+steering hard left versus right — the pair splits under steering, sinks
+together under braking, and the rear pair never moves, so the model is
+dive-only with no squat, as in Sega Rally 2). Pitch is the pair's shared
+part, nose-down positive; roll is half their difference, lean-left positive;
+both clamped to ±0.2 rad. Under a sustained load the pair keeps creeping (a
+slow spring: resting nose-in against a wall it settles at about twice the
+braking dive), which is the game's own model and is reported as it is.
+
+A true heading is still unmapped: the signed 16-bit value that mirrors
+steering exactly (0x5052a8, ±1344 for ±0.19 of lock) behaves like a steering
+or road-relative angle and has not been separated from one; the display
+list's matrix and translation writes are all view-relative, and no winding
+angle turns with the laps in the probed RAM (work RAM 0x500000–0x600000,
+main RAM 0x200000–0x21ffff, buffer RAM 0x900000–0x91ffff, each dumped over
+full scripted races). Yaw rate is reported directly rather than a heading.
 
 `daytona93` (Deluxe '93) has not had its physics block probed: on that set the
 emitter sends the inputs, the drive board and the speed, with the position
@@ -116,8 +129,14 @@ fields 0, until the same probe is run against `roms/daytona93.zip`.
 ## Testing it
 
 `test_app_telemetry` checks the wire bytes: the acceleration channels'
-convention, the dash block, the parked sample (no gravity on the vertical
-channel, gear 0, no position) and the spec parser. The end-to-end run is the
-game itself with `DAYTONA_TELEMETRY=127.0.0.1:20777@both` and the listener
-script: one JSON and one 324-byte Forza datagram per frame, `on` 0 until a
-race starts, the position tracing the course as you drive.
+convention, the pitch and roll signs at 60/64, the suspension block, the
+dash block, the parked sample (no gravity on the vertical channel, gear 0,
+no position, suspension at rest) and the spec parser. The end-to-end run is
+the game itself with `DAYTONA_TELEMETRY=127.0.0.1:20777@both` and the
+listener script: one JSON and one 324-byte Forza datagram per frame, `on` 0
+until a race starts, the position tracing the course as you drive.
+
+Two behaviours of the game itself are worth knowing when scripting runs:
+the race is a rolling start behind a pacer car (the ROLLING START banner),
+and the start time drifts between runs, so time inputs to events in the
+data, not to absolute frames.

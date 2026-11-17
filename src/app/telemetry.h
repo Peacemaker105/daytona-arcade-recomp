@@ -36,9 +36,11 @@ struct TelemetrySample {
     int effect = 0;        // the drive board's effect, as DriveBoard::Effect's number
     float long_g = 0, lat_g = 0, vert_g = 1;
     float yaw_rate = 0;
+    float pitch = 0, roll = 0; // rad, the game's own: nose-down positive, lean-left positive
     float pos_x = 0, pos_y = 0, pos_z = 0;
     bool have_pos = false;
     float distance = 0;    // metres driven this race
+    float susp_l = 0, susp_r = 0; // the game's front suspension pair, as read
     uint64_t frame = 0;
 };
 

@@ -40,8 +40,10 @@ app::TelemetrySample racing_sample() {
     s.ffb = 0.25f, s.shake = 0.1f, s.effect = 4;
     s.long_g = -1.0f, s.lat_g = 1.5f, s.vert_g = 1.25f;
     s.yaw_rate = 0.8f;
+    s.pitch = 0.065f, s.roll = -0.013f;
     s.pos_x = 100.0f, s.pos_y = 5.0f, s.pos_z = -50.0f;
     s.have_pos = true;
+    s.susp_l = -0.065f, s.susp_r = -0.052f;
     s.distance = 1234.5f;
     s.frame = 100;
     return s;
@@ -55,7 +57,6 @@ int main() {
     std::memset(pkt, 0xEE, sizeof pkt);
     const size_t n = app::telemetry_build_forza(racing_sample(), pkt);
     check(n == 324, "forza packet is 324 bytes");
-    const uint8_t zero[400] = {};
     std::memset(pkt + 324, 0xEE, sizeof pkt - 324);
     check(i32(pkt + 0) == 1, "is_race_on 1 while racing");
     check(i32(pkt + 4) == uint32_t(100 * 1000 / 57.524), "timestamp ms from the frame");
@@ -69,11 +70,16 @@ int main() {
     check(f32(pkt + 44) == 0, "pitch rate 0");
     check(std::fabs(f32(pkt + 48) - 0.8f) < 0.01f, "yaw rate on Y");
     check(f32(pkt + 52) == 0, "roll rate 0");
-    check(f32(pkt + 56) == 0 && f32(pkt + 60) == 0 && f32(pkt + 64) == 0, "yaw, pitch, roll stay 0");
+    check(f32(pkt + 56) == 0, "heading stays 0");
+    check(std::fabs(f32(pkt + 60) - 0.065f) < 0.001f, "pitch at 60, nose-down positive");
+    check(std::fabs(f32(pkt + 64) + 0.013f) < 0.001f, "roll at 64, lean-left positive");
     for (int i = 0; i < 4; i++) {
         const float travel = f32(pkt + 68 + 4 * i);
         check(travel > 0.02f && travel < 0.98f, "suspension within 0..1");
     }
+    check(f32(pkt + 68) > 0.5f, "compressed left front reads above rest");
+    check(f32(pkt + 72) < f32(pkt + 68), "the less-compressed right front reads closer to rest");
+    check(f32(pkt + 76) == 0.5f && f32(pkt + 80) == 0.5f, "the unmapped rear pair sits at rest");
     check(i32(pkt + 116) == 1 && i32(pkt + 128) == 1, "wheels on the ground");
     check(f32(pkt + 148) == 0.1f, "surface rumble carries the shake");
     check(i32(pkt + 212) == 1, "car ordinal");
@@ -96,6 +102,8 @@ int main() {
     app::telemetry_build_forza(off, pkt);
     check(i32(pkt + 0) == 0, "is_race_on 0 off the race");
     check(f32(pkt + 24) == 0, "vertical at rest carries no gravity");
+    check(f32(pkt + 60) == 0 && f32(pkt + 64) == 0, "parked: no pitch, no roll");
+    check(f32(pkt + 68) == 0.5f, "parked: suspension at rest");
     check(f32(pkt + 244 + 0) == 0 && f32(pkt + 244 + 12) == 0, "parked: no position, no speed");
     check(pkt[244 + 75] == 0, "parked: gear 0");
 
@@ -106,6 +114,8 @@ int main() {
     check(buf[j - 1] == '\n', "json ends with a newline");
     check(std::strstr(buf, "\"on\":1") && std::strstr(buf, "\"speed\":75.00"), "json on and speed");
     check(std::strstr(buf, "\"gear\":4") && std::strstr(buf, "\"lat_g\":1.500"), "json gear and lat_g");
+    check(std::strstr(buf, "\"pitch\":0.0650") && std::strstr(buf, "\"roll\":-0.0130"), "json pitch and roll");
+    check(std::strstr(buf, "\"susp_l\":-0.0650"), "json suspension pair");
     check(std::strstr(buf, "\"pos_x\":100.00"), "json position");
     check(app::telemetry_build_json(off, buf, sizeof buf) < sizeof buf, "json off sample builds");
 

@@ -17,11 +17,12 @@
 //
 // The car's world position is the game's own physics, validated against the
 // speed (displacement per frame tracks it) and against the course shape
-// (the beginner oval's XZ path matches the track). Yaw rate and the g
-// forces are derived from it. There is no pitch or roll anywhere in the
-// player block: those stay 0, as does the heading the Forza packet would
-// carry (the game keeps none that moves with the car; the camera's matrices
-// are view-relative and have no world heading in them).
+// (the beginner oval's XZ path matches the track). Yaw rate is derived from
+// it; pitch and roll come from the game's own front suspension pair (dive
+// under braking, lean under steering; the game models no squat, so pitch is
+// dive-only). The raw integer at 0x505198 is the tachometer percentage, not
+// the speed: the HUD km/h formula only fits under load, so the speed
+// reported here is the position-derived one whenever the position flows.
 #include "app/telemetry.h"
 #include "runtime/drive_board.h"
 
@@ -66,6 +67,12 @@ constexpr uint32_t POS_Z = 0x5051a4;       // hills to about 10)
 constexpr uint32_t GEAR = 0x5052cc;        // 0 reverse/neutral, then 1-4
 constexpr uint32_t RACE_FLAG = 0x505300;   // 1.0 while a race scene is loaded, 0 outside
 constexpr uint32_t DISTANCE = 0x5078b4;    // metres driven this race, 16.16 fixed point
+constexpr uint32_t SUSP_L = 0x5056c0;      // the player's record (the first of twenty at
+constexpr uint32_t SUSP_R = 0x5056c4;      // 0x505300, stride 0x300): the front pair's
+                                           // suspension, radians-ish: 0 at rest, negative
+                                           // compressed (dive under braking, lean under
+                                           // steering), a rear pair at +0x3c8 that the
+                                           // game never moves (it models no squat)
 
 #ifdef M2_ROMSET
 constexpr bool kPhysicsMapped = std::string_view(M2_ROMSET) == "daytona";
@@ -102,6 +109,7 @@ struct Kinematics {
     float yaw_rate = 0;                // rad/s, + turning right (smoothed)
     float long_g = 0, lat_g = 0;       // smoothed, g
     float vert_g = 1;                  // 1 g at rest
+    float speed_mps = 0;               // from the position, not the tach
     bool racing = false;               // the race scene flag's last state
 
     // One frame: the game's own values in, the derived forces out.
@@ -123,6 +131,7 @@ struct Kinematics {
                     accel_world_x = (nvx - vx) / dt;
                     accel_world_z = (nvz - vz) / dt;
                     vx = 0.5f * (vx + nvx), vz = 0.5f * (vz + nvz);
+                    speed_mps = std::sqrt(vx * vx + vz * vz);
                     if (step > 0.01f) {
                         // The travel heading: + is right (checked against the
                         // scripted steering phases), and the course on the
@@ -155,7 +164,7 @@ struct Kinematics {
         } else {
             long_g *= 0.7f, lat_g *= 0.7f, yaw_rate *= 0.7f;
             vert_g += (1.0f - vert_g) * 0.3f;
-            vx = vz = 0;
+            vx = vz = speed_mps = 0;
             have_pos = false; // the block freezes in menus: re-anchor on race entry
         }
     }
@@ -168,17 +177,27 @@ void replay_drive_commands(rt::DriveBoard &drive, const uint8_t *commands, size_
 }
 
 TelemetrySample read_sample(rt::M2Board &board, const rt::Inputs &in, const rt::DriveBoard &drive,
-                   const Kinematics &kin, uint64_t frame) {
+                            const Kinematics &kin, uint64_t frame) {
     TelemetrySample s;
     s.frame = frame;
     s.on = kin.racing;
-    s.speed = kin.racing ? speed_of(board) : 0;
+    // The tach cell (speed_of) fits the HUD speed only under load: whenever
+    // the position flows, the position-derived speed is the truth.
+    s.speed = kin.racing ? (kin.have_pos && kPhysicsMapped ? kin.speed_mps : speed_of(board)) : 0;
     s.gear = 0;
     if (kPhysicsMapped && kin.racing) {
         const int32_t g = int32_t(board.read_dword(GEAR));
         if (g >= 0 && g <= 4) s.gear = g;
         const uint32_t raw = board.read_dword(DISTANCE);
         s.distance = float(raw >> 4) / 1048576.0f; // 16.16 fixed point, metres
+        const uint32_t rl = board.read_dword(SUSP_L), rr = board.read_dword(SUSP_R);
+        std::memcpy(&s.susp_l, &rl, 4), std::memcpy(&s.susp_r, &rr, 4);
+        if (std::isfinite(s.susp_l) && std::isfinite(s.susp_r)) {
+            // The pair leans together under braking (dive) and splits under
+            // steering (lean): pitch and roll, radians, sane range checked.
+            s.pitch = std::clamp(-(s.susp_l + s.susp_r) * 0.5f, -0.2f, 0.2f); // nose-down positive
+            s.roll = std::clamp((s.susp_r - s.susp_l) * 0.5f, -0.2f, 0.2f);   // lean-left positive
+        }
     }
     int steer = int(in.steer) - 128;
     s.steer = std::clamp(float(steer) / 96.0f, -1.0f, 1.0f); // the app's own ADC scale
@@ -287,14 +306,17 @@ size_t telemetry_build_forza(const TelemetrySample &s, uint8_t *p) {
     put_f32(p + 32, 0), put_f32(p + 36, 0);  // velocity: sideways, vertical
     put_f32(p + 40, s.speed);                // forward, m/s
     put_f32(p + 44, 0), put_f32(p + 48, s.yaw_rate), put_f32(p + 52, 0); // angular: yaw rate on Y
-    put_f32(p + 56, 0), put_f32(p + 60, 0), put_f32(p + 64, 0); // yaw, pitch, roll: none in RAM
-    // Suspension, a plausible dressing of the forces (the game's real
-    // suspension is not mapped): 0.5 at rest, braking on the front, cornering
-    // on the outer (left, turning right) wheels
-    const float fl = std::clamp(0.5f + 0.10f * s.lat_g - 0.12f * s.long_g, 0.02f, 0.98f);
-    const float fr = std::clamp(0.5f - 0.10f * s.lat_g - 0.12f * s.long_g, 0.02f, 0.98f);
-    const float rl = std::clamp(0.5f + 0.10f * s.lat_g + 0.12f * s.long_g, 0.02f, 0.98f);
-    const float rr = std::clamp(0.5f - 0.10f * s.lat_g + 0.12f * s.long_g, 0.02f, 0.98f);
+    put_f32(p + 56, 0), put_f32(p + 60, s.pitch), put_f32(p + 64, s.roll); // yaw stays 0; pitch, roll
+    // Suspension, 0..1 with 1 compressed. The game's front pair is real
+    // (0 at rest, negative compressed): scale it around 0.5. The rear pair
+    // exists in the record but the game never moves it (no squat is
+    // modelled), so the rear stays at rest.
+    const float fl = s.have_pos ? std::clamp(0.5f - s.susp_l * 3.0f, 0.02f, 0.98f)
+                                : std::clamp(0.5f + 0.10f * s.lat_g - 0.12f * s.long_g, 0.02f, 0.98f);
+    const float fr = s.have_pos ? std::clamp(0.5f - s.susp_r * 3.0f, 0.02f, 0.98f)
+                                : std::clamp(0.5f - 0.10f * s.lat_g - 0.12f * s.long_g, 0.02f, 0.98f);
+    const float rl = s.have_pos ? 0.5f : std::clamp(0.5f + 0.10f * s.lat_g + 0.12f * s.long_g, 0.02f, 0.98f);
+    const float rr = s.have_pos ? 0.5f : std::clamp(0.5f - 0.10f * s.lat_g + 0.12f * s.long_g, 0.02f, 0.98f);
     put_f32(p + 68, fl), put_f32(p + 72, fr), put_f32(p + 76, rl), put_f32(p + 80, rr);
     // Slip at the driven (rear) wheels: spinning away, locking brakes
     float slip = 0;
@@ -346,10 +368,10 @@ size_t telemetry_build_json(const TelemetrySample &s, char *out, size_t cap) {
                   "\"steer\":%.3f,\"gas\":%.3f,\"brake\":%.3f,"
                   "\"ffb_force\":%.3f,\"shake\":%.3f,\"ffb_effect\":%d,"
                   "\"long_g\":%.3f,\"lat_g\":%.3f,\"vert_g\":%.3f,\"yaw_rate\":%.3f,"
-                  "\"pos_x\":%.2f,\"pos_y\":%.2f,\"pos_z\":%.2f,\"distance\":%.1f}\n",
+                  "\"pos_x\":%.2f,\"pos_y\":%.2f,\"pos_z\":%.2f,\"distance\":%.1f,\"pitch\":%.4f,\"roll\":%.4f,\"susp_l\":%.4f,\"susp_r\":%.4f}\n",
                   (unsigned long long)s.frame, s.on ? 1 : 0, s.speed, s.speed * 3.6f, s.rpm, s.gear, s.steer, s.gas,
                   s.brake, s.ffb, s.shake, s.effect, s.long_g, s.lat_g, s.vert_g, s.yaw_rate, s.pos_x, s.pos_y,
-                  s.pos_z, s.distance);
+                  s.pos_z, s.distance, s.pitch, s.roll, s.susp_l, s.susp_r);
     return std::strlen(out);
 }
 
