@@ -48,7 +48,7 @@ packet ever changes:
 | 212–231 | car/class/performance/drivetrain/cylinders | stock car ordinals |
 | 244–255 | world position xyz | the game's own, metres (0 off the race) |
 | 256 | speed m/s | as offset 40 |
-| 292 | distance | metres driven this race, the game's own counter |
+| 292 | distance | metres driven this race, summed from the game's own position (0 off the race) |
 | 308 | race time | frames since the app started ÷ 57.524 |
 | 315/316 | throttle/brake bytes | 0..255 |
 | 318/319 | handbrake/gear | handbrake 0 (Daytona has none); gear 0–4, the game's own |
@@ -90,7 +90,7 @@ All of it is read from the game's work RAM each frame; these are Revision A
 | 0x5052cc | gear, 0 reverse/neutral then 1–4 |
 | 0x505300 | 1.0 float while a race scene is loaded, 0 outside it; the player's car is the first of a twenty-car record array at 0x505300, stride 0x300 |
 | 0x5056c0/0x5056c4 | the player's front suspension pair (record +0x3c0/+0x3c4): 0 at rest, negative compressed — both sink together under braking (dive), split under steering (lean); −0.065 both at −2.5 g of braking. A rear pair at +0x3c8/+0x3cc exists and the game never moves it |
-| 0x5078b4 | metres driven this race, 16.16 fixed point |
+| 0x5078b4 | **not** a distance counter, though first mapped as one: a float near 1.25 that drifts a few per cent while the car covers kilometres (four probe runs, HANDOFF.md) |
 
 The position is the strongest check in the chain and the source of most of
 what is derived: plotted over a race it draws the beginner oval and its
@@ -102,7 +102,8 @@ accelerations come from differentiating the velocity in the car's frame:
 longitudinal along it, lateral across it. A respawn or the attract loop's
 reset jumps the position tens of metres in one frame; moves past what a
 plausible speed allows are dropped rather than differentiated, so a crash
-never kicks the platform.
+never kicks the platform. The distance driven is the sum of the accepted
+moves, from the race scene's start (a respawn's jump is not counted).
 
 Pitch and roll are the game's own, from the front suspension pair in the
 player's record (found by the mirror trick: two runs identical except

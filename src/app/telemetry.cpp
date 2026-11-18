@@ -17,12 +17,13 @@
 //
 // The car's world position is the game's own physics, validated against the
 // speed (displacement per frame tracks it) and against the course shape
-// (the beginner oval's XZ path matches the track). Yaw rate is derived from
-// it; pitch and roll come from the game's own front suspension pair (dive
-// under braking, lean under steering; the game models no squat, so pitch is
-// dive-only). The raw integer at 0x505198 is the tachometer percentage, not
-// the speed: the HUD km/h formula only fits under load, so the speed
-// reported here is the position-derived one whenever the position flows.
+// (the beginner oval's XZ path matches the track). Yaw rate and the distance
+// driven are derived from it; pitch and roll come from the game's own front
+// suspension pair (dive under braking, lean under steering; the game models
+// no squat, so pitch is dive-only). The raw integer at 0x505198 is the
+// tachometer percentage, not the speed: the HUD km/h formula only fits under
+// load, so the speed reported here is the position-derived one whenever the
+// position flows.
 #include "app/telemetry.h"
 #include "runtime/drive_board.h"
 
@@ -66,7 +67,6 @@ constexpr uint32_t POS_Y = 0x5051a0;       // ground plane, Y up (0 on the road,
 constexpr uint32_t POS_Z = 0x5051a4;       // hills to about 10)
 constexpr uint32_t GEAR = 0x5052cc;        // 0 reverse/neutral, then 1-4
 constexpr uint32_t RACE_FLAG = 0x505300;   // 1.0 while a race scene is loaded, 0 outside
-constexpr uint32_t DISTANCE = 0x5078b4;    // metres driven this race, 16.16 fixed point
 constexpr uint32_t SUSP_L = 0x5056c0;      // the player's record (the first of twenty at
 constexpr uint32_t SUSP_R = 0x5056c4;      // 0x505300, stride 0x300): the front pair's
                                            // suspension, radians-ish: 0 at rest, negative
@@ -110,6 +110,8 @@ struct Kinematics {
     float long_g = 0, lat_g = 0;       // smoothed, g
     float vert_g = 1;                  // 1 g at rest
     float speed_mps = 0;               // from the position, not the tach
+    float distance = 0;                // metres driven this race: the accepted moves summed
+                                       // (0x5078b4, once taken for a distance, is not one)
     bool racing = false;               // the race scene flag's last state
 
     // One frame: the game's own values in, the derived forces out.
@@ -132,6 +134,7 @@ struct Kinematics {
                     accel_world_z = (nvz - vz) / dt;
                     vx = 0.5f * (vx + nvx), vz = 0.5f * (vz + nvz);
                     speed_mps = std::sqrt(vx * vx + vz * vz);
+                    distance += step;
                     if (step > 0.01f) {
                         // The travel heading: + is right (checked against the
                         // scripted steering phases), and the course on the
@@ -164,7 +167,7 @@ struct Kinematics {
         } else {
             long_g *= 0.7f, lat_g *= 0.7f, yaw_rate *= 0.7f;
             vert_g += (1.0f - vert_g) * 0.3f;
-            vx = vz = speed_mps = 0;
+            vx = vz = speed_mps = distance = 0;
             have_pos = false; // the block freezes in menus: re-anchor on race entry
         }
     }
@@ -188,8 +191,7 @@ TelemetrySample read_sample(rt::M2Board &board, const rt::Inputs &in, const rt::
     if (kPhysicsMapped && kin.racing) {
         const int32_t g = int32_t(board.read_dword(GEAR));
         if (g >= 0 && g <= 4) s.gear = g;
-        const uint32_t raw = board.read_dword(DISTANCE);
-        s.distance = float(raw >> 4) / 1048576.0f; // 16.16 fixed point, metres
+        s.distance = kin.distance;
         const uint32_t rl = board.read_dword(SUSP_L), rr = board.read_dword(SUSP_R);
         std::memcpy(&s.susp_l, &rl, 4), std::memcpy(&s.susp_r, &rr, 4);
         if (std::isfinite(s.susp_l) && std::isfinite(s.susp_r)) {
@@ -217,34 +219,29 @@ native_socket sock = native_socket(-1);
 sockaddr_in dest{};
 bool send_json = true, send_forza = false;
 
+bool net_ready() { // Windows sockets started, once (nothing to start elsewhere)
+#ifdef _WIN32
+    static const bool ok = [] {
+        WSADATA wsa;
+        return WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
+    }();
+    return ok;
+#else
+    return true;
+#endif
+}
 
 bool open_socket(const char *host, int port) {
-#ifdef _WIN32
-    WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa)) return false;
-#endif
-    sock = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock == native_socket(-1)) return false;
+    uint32_t ip = 0; // network byte order
+    if (!telemetry_resolve(host, ip)) return false;
     std::memset(&dest, 0, sizeof dest);
     dest.sin_family = AF_INET;
     dest.sin_port = htons(uint16_t(port));
-#ifdef _WIN32
-    inet_pton(AF_INET, host, &dest.sin_addr);
-    if (dest.sin_addr.s_addr == INADDR_NONE) { // a name, then
-        addrinfo *ai = nullptr;
-        if (getaddrinfo(host, nullptr, nullptr, &ai) || !ai) return false;
-        dest.sin_addr = ((sockaddr_in *)ai->ai_addr)->sin_addr;
-        freeaddrinfo(ai);
-    }
-#else
-    if (::inet_pton(AF_INET, host, &dest.sin_addr) != 1) { // a name, then
-        addrinfo hints{}, *ai = nullptr;
-        hints.ai_family = AF_INET;
-        if (getaddrinfo(host, nullptr, &hints, &ai) || !ai) return false;
-        dest.sin_addr = ((sockaddr_in *)ai->ai_addr)->sin_addr;
-        freeaddrinfo(ai);
-    }
-#endif
+    std::memcpy(&dest.sin_addr, &ip, 4);
+    // The socket once the address is known: a name that does not resolve
+    // leaves the telemetry off instead of sending into nothing
+    sock = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock == native_socket(-1)) return false;
     // A broadcast address (a rig on another machine's subnet, x.x.x.255) is
     // allowed only with the socket option set
     const uint32_t addr = ntohl(dest.sin_addr.s_addr);
@@ -274,6 +271,20 @@ void put_u32(uint8_t *p, uint32_t v) { std::memcpy(p, &v, 4); }
 
 
 } // namespace
+
+bool telemetry_resolve(const char *host, uint32_t &addr) {
+    if (!net_ready()) return false;
+    in_addr a{};
+    if (::inet_pton(AF_INET, host, &a) != 1) { // not a dotted address: a name, then
+        addrinfo hints{}, *ai = nullptr;
+        hints.ai_family = AF_INET; // an IPv4 answer for the sockaddr_in (localhost is ::1 first otherwise)
+        if (getaddrinfo(host, nullptr, &hints, &ai) || !ai) return false;
+        a = ((sockaddr_in *)ai->ai_addr)->sin_addr;
+        freeaddrinfo(ai);
+    }
+    std::memcpy(&addr, &a, 4);
+    return true;
+}
 
 bool telemetry_parse_spec(const char *e, std::string &host, int &port) {
     std::string spec(e);
@@ -389,7 +400,7 @@ void telemetry_frame(rt::M2Board &board, const rt::Inputs &inputs, const uint8_t
         int port = 0;
         if (!telemetry_parse_spec(e, host, port)) return;
         if (!open_socket(host.c_str(), port)) {
-            std::printf("[telemetry] could not open a UDP socket for %s:%d\n", host.c_str(), port);
+            std::printf("[telemetry] could not resolve %s or open a UDP socket (port %d)\n", host.c_str(), port);
             return;
         }
         std::printf("[telemetry] sending %s to %s:%d at %.1f Hz\n",

@@ -54,6 +54,9 @@ size_t telemetry_build_forza(const TelemetrySample &s, uint8_t *out);
 size_t telemetry_build_json(const TelemetrySample &s, char *out, size_t cap);
 // "host:port[@json|@forza|@both]"; says and returns false when it is not one.
 bool telemetry_parse_spec(const char *e, std::string &host, int &port);
+// host: a dotted IPv4 address, or a name looked up (IPv4 only). addr: the
+// address in network byte order. False when the name does not resolve.
+bool telemetry_resolve(const char *host, uint32_t &addr);
 
 // board: the game's memory, read only. inputs: what the game saw this frame.
 // commands: the drive-board bytes this frame's run appended (the caller's own

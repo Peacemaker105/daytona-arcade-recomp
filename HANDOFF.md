@@ -1,5 +1,47 @@
 # Handoff
 
+## Telemetry: distance from the position, host names resolve (2026-11-18, evening)
+
+0x5078b4 is not a distance counter, and the 16.16 reading of it was never
+checked against the distance covered (the scan ranked it on its correlation
+with speed). Re-read from the four saved probe runs (kept outside the
+repository), the cell holds a float near 1.25 (0x3f9c3119..0x3fa35556) that
+drifts a few per cent while the car covers kilometres; the emitter's
+raw / 2^24 turned it into a flat 63.6 m.
+
+| Run | Racing samples | Path from the position | 0x5078b4 as 16.16 |
+|---|---|---|---|
+| probe_work (every 6th frame) | 982 | 2,860.8 m | 16,290.7 → 16,284.2 |
+| probe_launch | 1,669 | 1,799.9 m | 16,291.3 → 16,293.1 |
+| probe_brake | 4,069 | 1,297.2 m | 16,291.3 → 16,286.9 |
+| probe_brake2 | 4,962 | 1,142.3 m | 16,291.3 → 16,287.0 |
+
+The distance driven is now the sum of the position moves the kinematics
+already accept (teleports dropped), reset when the race scene unloads, and
+the cell is no longer read. A real distance or lap-progress cell is still
+unmapped.
+
+A host name in DAYTONA_TELEMETRY (localhost, a PC's name) never reached the
+network on Windows. The Windows branch tested inet_pton's output for
+INADDR_NONE, but a failed inet_pton leaves the address 0.0.0.0, so the
+lookup never ran and every datagram went to 0.0.0.0, which Windows refuses
+(WSAEADDRNOTAVAIL; the send's result is not checked). The lookup also asked
+for any address family, and localhost answers ::1 first, which a
+sockaddr_in cannot hold. Both platforms now share one IPv4 lookup
+(`telemetry_resolve`), and the socket opens only once the address is known,
+so a name that does not resolve leaves the telemetry off. Sega Rally 2's
+emitter, which this one was ported from, had the same bug.
+
+Tests: app_telemetry now checks a dotted address and localhost. 20 of 22
+pass, lua_core and lua_plugin_mock skipped as before (they need
+--test-extras). Not run in the game itself: the telemetry only runs in the
+windowed app, so the distance sum is checked by the offline computation
+above (a 4 m-a-frame jump filter, close to the emitter's).
+
+First build in this folder: `M2_COMPILER=msvc py scripts/setup.py` (the
+toolchain is installed, so setup.ps1's winget step is not needed), 34 min
+from scratch on this PC, 279 s of it mame_oracle.
+
 ## Pitch, roll and the suspension pair; the tach cell correction (2026-11-18, later)
 
 The "no pitch or roll in RAM" conclusion from earlier today was wrong, and
@@ -2128,6 +2170,10 @@ Also found:
   5,497 candidates, mostly chance matches in graphics data.
 - A TGP microcode ROM dump. The program is uploaded at boot from the game's
   data ROM; dump TGP program RAM only after the upload, or it is zeros.
+- 0x5078b4 as the distance driven. It is a float near 1.25 that does not
+  follow the distance (four probe runs, 2026-11-18); the telemetry sums the
+  position instead. Check a candidate's growth against the path length the
+  position covers, not only its correlation with speed.
 
 M1 native (`tools/m2recomp`, `tools/m2native`, `src/runtime/lockstep`):
 

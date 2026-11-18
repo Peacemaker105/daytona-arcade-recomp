@@ -1,6 +1,6 @@
 // Telemetry packet builders (src/app/telemetry.h): the Forza data-out
 // packet's byte layout against the dashboard reader's expectations, the JSON
-// line's fields, and the DAYTONA_TELEMETRY spec parser.
+// line's fields, the DAYTONA_TELEMETRY spec parser and the host lookup.
 #include "app/telemetry.h"
 
 #include <cmath>
@@ -130,6 +130,16 @@ int main() {
           "both spec parses");
     check(!app::telemetry_parse_spec("no-port-here", host, port), "a spec without a port is refused");
     check(!app::telemetry_parse_spec("1.2.3.4:1@xml", host, port), "an unknown format is refused");
+
+    // The host lookup: a dotted address as it is, a name looked up (localhost
+    // is answered by the system itself, no network needed)
+    const uint8_t loopback[4] = {127, 0, 0, 1};
+    uint32_t addr = 0;
+    check(app::telemetry_resolve("127.0.0.1", addr) && !std::memcmp(&addr, loopback, 4),
+          "a dotted address is taken as it is");
+    addr = 0;
+    check(app::telemetry_resolve("localhost", addr) && !std::memcmp(&addr, loopback, 4),
+          "a host name is looked up (localhost)");
 
     if (failures) std::fprintf(stderr, "%d failures\n", failures);
     return failures;
